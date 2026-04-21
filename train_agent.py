@@ -105,38 +105,42 @@ def get_baseline_opponent():
     return opponent_fn
 
 
-NUM_ENVS_PER_WORKER = 4  # More envs per worker for faster sampling
+NUM_ENVS_PER_WORKER = 2
 
 
 if __name__ == "__main__":
-    # Disable dashboard and metrics to avoid hostname issues
     import os
+    import logging
+
+    # Suppress Ray dashboard/metrics noise
     os.environ["RAY_DASHBOARD_ENABLED"] = "0"
-    os.environ["RAY_CLOUD_PLATFORM"] = "aws"  # Skip cloud detection
     os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
-    os.environ["RAY_EVENT_ENABLE_LEGACY_GCS_SERVICE"] = "1"
-    os.environ["RAY_METRICS_ENABLE_GCS"] = "0"  # Disable GCS metrics
-    
-    ray.init(
-        include_dashboard=False,
-        dashboard_host="127.0.0.1",
-        num_cpus=24,
-        _metrics_export_port=None,  # Disable metrics port
-    )
+    os.environ["RAY_METRICS_ENABLE_GCS"] = "0"
+
+    # Suppress noisy loggers
+    logging.getLogger("mlagents_envs").setLevel(logging.WARNING)
+    logging.getLogger("ray").setLevel(logging.ERROR)
+    logging.getLogger("ray.tune").setLevel(logging.WARNING)
+
+    ray.init(include_dashboard=False, num_cpus=24, _metrics_export_port=None)
 
     tune.registry.register_env("Soccer", create_rllib_env)
 
+    print("=" * 60)
+    print("Starting PPO training vs baseline agent")
+    print(f"  Workers: 22 x 2 envs = 44 Unity processes")
+    print(f"  GPU: 1  |  Batch: 20000  |  Target: 10M steps")
+    print("=" * 60)
+
     analysis = tune.run(
         "PPO",
-        name="PPO_SP_vs_Baseline",
+        name="PPO_test",
         config={
-            # system settings - RTX 5080 optimized
-            "num_gpus": 1,  # Use your GPU!
-            "num_workers": 6,  # Parallel workers (adjust based on CPU cores)
+            "num_gpus": 1,
+            "num_workers": 22,
             "num_envs_per_worker": NUM_ENVS_PER_WORKER,
-            "log_level": "INFO",
+            "log_level": "WARN",
             "framework": "torch",
-            # RL setup
             "env": "Soccer",
             "env_config": {
                 "num_envs_per_worker": NUM_ENVS_PER_WORKER,
@@ -144,16 +148,15 @@ if __name__ == "__main__":
                 "multiagent": False,
                 "single_player": True,
                 "flatten_branched": True,
-                "opponent_policy": get_baseline_opponent(),  # Use baseline!
+                "opponent_policy": get_baseline_opponent(),
                 "base_port": 50500,
             },
             "model": {
                 "vf_share_layers": True,
-                "fcnet_hiddens": [512, 512, 256],  # Larger network for GPU
+                "fcnet_hiddens": [512, 512, 256],
             },
-            # Training parameters - optimized for speed
             "rollout_fragment_length": 500,
-            "train_batch_size": 20000,  # Larger batch for GPU
+            "train_batch_size": 20000,
             "sgd_minibatch_size": 512,
             "num_sgd_iter": 8,
             "lr": 3e-4,
@@ -162,12 +165,15 @@ if __name__ == "__main__":
             "clip_param": 0.2,
             "entropy_coeff": 0.01,
         },
-        stop={
-            "timesteps_total": 10000000,  # 10M steps - GPU can handle more
-        },
+        stop={"timesteps_total": 10000000},
         checkpoint_freq=100,
         checkpoint_at_end=True,
         local_dir="./ray_results",
+        verbose=2,  # Show iteration results
+        progress_reporter=tune.CLIReporter(
+            metric_columns=["episode_reward_mean", "timesteps_total", "training_iteration"],
+            print_intermediate_tables=True,
+        ),
     )
 
     # Gets best trial based on max accuracy across all training iterations.
