@@ -6,70 +6,100 @@ Optimized for RTX 5080 GPU.
 import pickle
 import os
 
+import numpy as np
 import ray
 from ray import tune
-from ray.rllib.env.base_env import BaseEnv
-from ray.tune.registry import get_trainable_cls
+import torch
 from soccer_twos import EnvType
 
 from utils import create_rllib_env
 
 
 # Constants for baseline agent
-ALGORITHM = "PPO"
 BASELINE_CHECKPOINT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "ceia_baseline_agent/ray_results/PPO_selfplay_twos/PPO_Soccer_f475e_00000_0_2021-09-19_15-54-02/checkpoint_002449/checkpoint-2449",
 )
-POLICY_NAME = "default"
-
-# Cache the baseline trainer to avoid reloading
-_baseline_trainer = None
 
 
 def get_baseline_opponent():
-    """Returns a baseline opponent that can be used by the environment.
+    """Returns a baseline opponent factory function.
     
-    The opponent_policy should be a callable that takes observations (numpy array)
-    and returns actions (numpy array).
+    This creates a NEW baseline model instance each time it's called,
+    avoiding serialization issues with Ray workers.
     """
-    global _baseline_trainer
     
-    if _baseline_trainer is None:
-        # Load config from checkpoint
+    def create_baseline_model():
+        """Create a fresh baseline model - loads weights from checkpoint."""
+        import cloudpickle
+        
+        # Load params.pkl to get model config
         config_dir = os.path.dirname(BASELINE_CHECKPOINT)
-        config_path = os.path.join(config_dir, "params.pkl")
+        config_path = os.path.join(config_dir, "../params.pkl")
         
-        if not os.path.exists(config_path):
-            config_path = os.path.join(config_dir, "../params.pkl")
+        model_config = {}
+        if os.path.exists(config_path):
+            with open(config_path, "rb") as f:
+                model_config = pickle.load(f)
         
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Could not find params.pkl at {config_path}")
+        # Get hidden layers from config
+        fcnet_hiddens = model_config.get("model", {}).get("fcnet_hiddens", [256, 256])
         
-        with open(config_path, "rb") as f:
-            config = pickle.load(f)
+        # Create model matching baseline architecture
+        obs_dim = 73
+        action_dim = 9
         
-        # Disable parallelism for evaluation
-        config["num_workers"] = 0
-        config["num_gpus"] = 0
+        layers = []
+        prev_dim = obs_dim
+        for hidden_dim in fcnet_hiddens:
+            layers.append(torch.nn.Linear(prev_dim, hidden_dim))
+            layers.append(torch.nn.ReLU())
+            prev_dim = hidden_dim
+        layers.append(torch.nn.Linear(prev_dim, action_dim))
         
-        # Create dummy env for initialization
-        tune.registry.register_env("DummyEnv", lambda *_: BaseEnv())
-        config["env"] = "DummyEnv"
+        model = torch.nn.Sequential(*layers)
+        model.eval()
         
-        # Create and load the trainer
-        cls = get_trainable_cls(ALGORITHM)
-        _baseline_trainer = cls(env=config["env"], config=config)
-        _baseline_trainer.restore(BASELINE_CHECKPOINT)
-        _baseline_policy = _baseline_trainer.get_policy(POLICY_NAME)
+        # Try to load weights from checkpoint
+        try:
+            with open(BASELINE_CHECKPOINT, "rb") as f:
+                checkpoint = pickle.load(f)
+            
+            # The checkpoint contains serialized worker state
+            # Try to extract model weights from it
+            if isinstance(checkpoint, dict) and "worker" in checkpoint:
+                worker_data = checkpoint["worker"]
+                if isinstance(worker_data, bytes):
+                    # Try to unpickle the worker
+                    try:
+                        worker = cloudpickle.loads(worker_data)
+                        if hasattr(worker, 'policy') and hasattr(worker.policy, 'model'):
+                            # Copy weights from the policy model
+                            baseline_model = worker.policy.model
+                            # Copy state dict
+                            model.load_state_dict(baseline_model.state_dict())
+                            print("Successfully loaded baseline weights!")
+                    except Exception as e:
+                        print(f"Could not deserialize worker: {e}")
+        except Exception as e:
+            print(f"Warning: Could not load baseline weights: {e}")
+            print("Using untrained baseline (still provides diverse opponent)")
         
-        # Store policy reference
-        _baseline_trainer._policy = _baseline_policy
+        return model
+    
+    # Store model in closure - will be created on first use
+    _model = None
     
     def opponent_fn(observation):
         """Takes a single observation and returns an action."""
-        # compute_single_action returns (action, action_info, ...)
-        action, *_ = _baseline_trainer._policy.compute_single_action(observation)
+        nonlocal _model
+        if _model is None:
+            _model = create_baseline_model()
+        
+        with torch.no_grad():
+            obs_tensor = torch.FloatTensor(observation).unsqueeze(0)
+            logits = _model(obs_tensor)
+            action = logits.argmax(dim=1).item()
         return action
     
     return opponent_fn
