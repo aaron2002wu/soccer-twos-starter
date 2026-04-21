@@ -1,52 +1,48 @@
 """
 Simple training script for Soccer-Twos single player agent.
 Trains a PPO agent against a stationary opponent.
-Optimized for RTX 5080 GPU.
+Optimized for RTX 5070 GPU with Ray 2.x / PyTorch 2.x.
 """
 import os
 import logging
 
 import ray
-from ray import tune
+from ray import tune, air
+from ray.rllib.algorithms.ppo import PPOConfig
+from ray.tune.registry import register_env
 from soccer_twos import EnvType
 
 from utils import create_rllib_env
 
 
 NUM_ENVS_PER_WORKER = 2
+NUM_WORKERS = 22
 
 
 if __name__ == "__main__":
-    # Suppress Ray dashboard/metrics noise
     os.environ["RAY_DASHBOARD_ENABLED"] = "0"
     os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
-    os.environ["RAY_METRICS_ENABLE_GCS"] = "0"
 
     logging.getLogger("mlagents_envs").setLevel(logging.WARNING)
     logging.getLogger("ray").setLevel(logging.ERROR)
     logging.getLogger("ray.tune").setLevel(logging.WARNING)
 
-    ray.init(include_dashboard=False, num_cpus=24, _metrics_export_port=None)
+    ray.init(include_dashboard=False, num_cpus=24)
 
-    tune.registry.register_env("Soccer", create_rllib_env)
+    register_env("Soccer", create_rllib_env)
 
     print("=" * 60)
     print("Starting PPO training vs stationary opponent")
-    print(f"  Workers: 22 x {NUM_ENVS_PER_WORKER} envs = {22 * NUM_ENVS_PER_WORKER} Unity processes")
+    print(f"  Workers: {NUM_WORKERS} x {NUM_ENVS_PER_WORKER} envs = {NUM_WORKERS * NUM_ENVS_PER_WORKER} Unity processes")
     print(f"  GPU: 1  |  Batch: 20000  |  Target: 10M steps")
     print("=" * 60)
 
-    analysis = tune.run(
-        "PPO",
-        name="PPO_test",
-        config={
-            "num_gpus": 1,
-            "num_workers": 22,
-            "num_envs_per_worker": NUM_ENVS_PER_WORKER,
-            "log_level": "WARN",
-            "framework": "torch",
-            "env": "Soccer",
-            "env_config": {
+    config = (
+        PPOConfig()
+        .environment(
+            env="Soccer",
+            disable_env_checking=True,
+            env_config={
                 "num_envs_per_worker": NUM_ENVS_PER_WORKER,
                 "variation": EnvType.team_vs_policy,
                 "multiagent": False,
@@ -55,35 +51,49 @@ if __name__ == "__main__":
                 "opponent_policy": lambda *_: 0,  # stationary opponent
                 "base_port": 50500,
             },
-            "model": {
+        )
+        .framework("torch")
+        .resources(num_gpus=1)
+        .rollouts(
+            num_rollout_workers=NUM_WORKERS,
+            num_envs_per_worker=NUM_ENVS_PER_WORKER,
+            rollout_fragment_length=500,
+        )
+        .training(
+            train_batch_size=20000,
+            sgd_minibatch_size=512,
+            num_sgd_iter=8,
+            lr=3e-4,
+            gamma=0.99,
+            lambda_=0.95,
+            clip_param=0.2,
+            entropy_coeff=0.01,
+            model={
                 "vf_share_layers": True,
                 "fcnet_hiddens": [512, 512, 256],
             },
-            "rollout_fragment_length": 500,
-            "train_batch_size": 20000,
-            "sgd_minibatch_size": 512,
-            "num_sgd_iter": 8,
-            "lr": 3e-4,
-            "gamma": 0.99,
-            "lambda": 0.95,
-            "clip_param": 0.2,
-            "entropy_coeff": 0.01,
-        },
-        stop={"timesteps_total": 10000000},
-        checkpoint_freq=100,
-        checkpoint_at_end=True,
-        local_dir="./ray_results",
-        verbose=2,
-        progress_reporter=tune.CLIReporter(
-            metric_columns=["episode_reward_mean", "timesteps_total", "training_iteration"],
-            print_intermediate_tables=True,
+        )
+        .debugging(log_level="WARN")
+    )
+
+    tuner = tune.Tuner(
+        "PPO",
+        param_space=config.to_dict(),
+        run_config=air.RunConfig(
+            name="PPO_test",
+            stop={"timesteps_total": 10_000_000},
+            checkpoint_config=air.CheckpointConfig(
+                checkpoint_frequency=100,
+                checkpoint_at_end=True,
+            ),
+            local_dir="./ray_results",
+            verbose=2,
         ),
     )
 
-    best_trial = analysis.get_best_trial("episode_reward_mean", mode="max")
-    print(f"Best trial: {best_trial}")
-    best_checkpoint = analysis.get_best_checkpoint(
-        trial=best_trial, metric="episode_reward_mean", mode="max"
-    )
-    print(f"Best checkpoint: {best_checkpoint}")
+    results = tuner.fit()
+
+    best = results.get_best_result(metric="episode_reward_mean", mode="max")
+    print(f"Best trial config: {best.config}")
+    print(f"Best checkpoint: {best.checkpoint}")
     print("Done training!")
