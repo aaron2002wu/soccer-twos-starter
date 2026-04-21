@@ -45,9 +45,17 @@ class MyAgent(AgentInterface):
 
         ray.init(ignore_reinit_error=True, include_dashboard=False, num_cpus=1)
 
+        import gymnasium
+        obs_space = gymnasium.spaces.Box(low=-float("inf"), high=float("inf"), shape=(336,), dtype=np.float32)
+        act_space = gymnasium.spaces.Discrete(27)
+
         config = (
             PPOConfig()
-            .environment(env="CartPole-v1", disable_env_checking=True)
+            .environment(
+                observation_space=obs_space,
+                action_space=act_space,
+                disable_env_checking=True,
+            )
             .framework("torch")
             .resources(num_gpus=0)
             .rollouts(num_rollout_workers=0)
