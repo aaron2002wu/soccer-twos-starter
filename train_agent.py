@@ -79,8 +79,20 @@ NUM_ENVS_PER_WORKER = 4  # More envs per worker for faster sampling
 
 
 if __name__ == "__main__":
-    # Disable dashboard to avoid hostname issues
-    ray.init(include_dashboard=False)
+    # Disable dashboard and metrics to avoid hostname issues
+    import os
+    os.environ["RAY_DASHBOARD_ENABLED"] = "0"
+    os.environ["RAY_CLOUD_PLATFORM"] = "aws"  # Skip cloud detection
+    os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
+    os.environ["RAY_EVENT_ENABLE_LEGACY_GCS_SERVICE"] = "1"
+    os.environ["RAY_METRICS_ENABLE_GCS"] = "0"  # Disable GCS metrics
+    
+    ray.init(
+        include_dashboard=False,
+        dashboard_host="127.0.0.1",
+        num_cpus=24,
+        _metrics_export_port=None,  # Disable metrics port
+    )
 
     tune.registry.register_env("Soccer", create_rllib_env)
 
