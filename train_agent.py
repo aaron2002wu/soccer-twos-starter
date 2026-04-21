@@ -1,6 +1,6 @@
 """
 Simple training script for Soccer-Twos single player agent.
-Trains a PPO agent against a stationary opponent.
+Trains a PPO agent against the CEIA baseline opponent.
 Optimized for RTX 5070 GPU with Ray 2.x / PyTorch 2.x.
 """
 import os
@@ -13,6 +13,7 @@ from ray.tune.registry import register_env
 from soccer_twos import EnvType
 
 from utils import create_rllib_env
+from baseline_policy import load_baseline_policy
 
 
 NUM_ENVS_PER_WORKER = 2
@@ -31,8 +32,11 @@ if __name__ == "__main__":
 
     register_env("Soccer", create_rllib_env)
 
+    # Load baseline policy once — shared across all workers via closure
+    baseline_policy = load_baseline_policy()
+
     print("=" * 60)
-    print("Starting PPO training vs stationary opponent")
+    print("Starting PPO training vs CEIA baseline opponent")
     print(f"  Workers: {NUM_WORKERS} x {NUM_ENVS_PER_WORKER} envs = {NUM_WORKERS * NUM_ENVS_PER_WORKER} Unity processes")
     print(f"  GPU: 1  |  Batch: 20000  |  Target: 10M steps")
     print("=" * 60)
@@ -48,7 +52,7 @@ if __name__ == "__main__":
                 "multiagent": False,
                 "single_player": True,
                 "flatten_branched": True,
-                "opponent_policy": lambda *_: 0,  # stationary opponent
+                "opponent_policy": baseline_policy,
                 "base_port": 50500,
             },
         )
@@ -80,13 +84,13 @@ if __name__ == "__main__":
         "PPO",
         param_space=config.to_dict(),
         run_config=air.RunConfig(
-            name="PPO_test",
+            name="trainRun1",
             stop={"timesteps_total": 10_000_000},
             checkpoint_config=air.CheckpointConfig(
                 checkpoint_frequency=100,
                 checkpoint_at_end=True,
             ),
-            local_dir="./ray_results",
+            local_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "ray_results"),
             verbose=2,
         ),
     )
