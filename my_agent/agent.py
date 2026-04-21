@@ -5,7 +5,6 @@ import numpy as np
 import gym
 import ray
 from ray.rllib.algorithms.ppo import PPOConfig
-from ray.tune.registry import register_env
 from soccer_twos import AgentInterface, EnvType
 
 
@@ -44,16 +43,11 @@ class MyAgent(AgentInterface):
         checkpoint_path = CHECKPOINT_PATH
         print(f"[MyAgent] Loading checkpoint: {checkpoint_path}")
 
-        # Minimal env config just to build the algo — env won't actually be used
-        def _dummy_env(cfg):
-            return env
-
         ray.init(ignore_reinit_error=True, include_dashboard=False, num_cpus=1)
-        register_env("Soccer", _dummy_env)
 
         config = (
             PPOConfig()
-            .environment(env="Soccer", disable_env_checking=True)
+            .environment(env="CartPole-v1", disable_env_checking=True)
             .framework("torch")
             .resources(num_gpus=0)
             .rollouts(num_rollout_workers=0)
