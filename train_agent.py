@@ -1,13 +1,78 @@
 """
 Simple training script for Soccer-Twos single player agent.
-Trains a PPO agent against a random opponent.
+Trains a PPO agent against the baseline agent.
 Optimized for RTX 5080 GPU.
 """
+import pickle
+import os
+
 import ray
 from ray import tune
+from ray.rllib.env.base_env import BaseEnv
+from ray.tune.registry import get_trainable_cls
 from soccer_twos import EnvType
 
 from utils import create_rllib_env
+
+
+# Constants for baseline agent
+ALGORITHM = "PPO"
+BASELINE_CHECKPOINT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "ceia_baseline_agent/ray_results/PPO_selfplay_twos/PPO_Soccer_f475e_00000_0_2021-09-19_15-54-02/checkpoint_002449/checkpoint-2449",
+)
+POLICY_NAME = "default"
+
+# Cache the baseline trainer to avoid reloading
+_baseline_trainer = None
+
+
+def get_baseline_opponent():
+    """Returns a baseline opponent that can be used by the environment.
+    
+    The opponent_policy should be a callable that takes observations (numpy array)
+    and returns actions (numpy array).
+    """
+    global _baseline_trainer
+    
+    if _baseline_trainer is None:
+        # Load config from checkpoint
+        config_dir = os.path.dirname(BASELINE_CHECKPOINT)
+        config_path = os.path.join(config_dir, "params.pkl")
+        
+        if not os.path.exists(config_path):
+            config_path = os.path.join(config_dir, "../params.pkl")
+        
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Could not find params.pkl at {config_path}")
+        
+        with open(config_path, "rb") as f:
+            config = pickle.load(f)
+        
+        # Disable parallelism for evaluation
+        config["num_workers"] = 0
+        config["num_gpus"] = 0
+        
+        # Create dummy env for initialization
+        tune.registry.register_env("DummyEnv", lambda *_: BaseEnv())
+        config["env"] = "DummyEnv"
+        
+        # Create and load the trainer
+        cls = get_trainable_cls(ALGORITHM)
+        _baseline_trainer = cls(env=config["env"], config=config)
+        _baseline_trainer.restore(BASELINE_CHECKPOINT)
+        _baseline_policy = _baseline_trainer.get_policy(POLICY_NAME)
+        
+        # Store policy reference
+        _baseline_trainer._policy = _baseline_policy
+    
+    def opponent_fn(observation):
+        """Takes a single observation and returns an action."""
+        # compute_single_action returns (action, action_info, ...)
+        action, *_ = _baseline_trainer._policy.compute_single_action(observation)
+        return action
+    
+    return opponent_fn
 
 
 NUM_ENVS_PER_WORKER = 4  # More envs per worker for faster sampling
@@ -21,7 +86,7 @@ if __name__ == "__main__":
 
     analysis = tune.run(
         "PPO",
-        name="PPO_SP",
+        name="PPO_SP_vs_Baseline",
         config={
             # system settings - RTX 5080 optimized
             "num_gpus": 1,  # Use your GPU!
@@ -37,7 +102,7 @@ if __name__ == "__main__":
                 "multiagent": False,
                 "single_player": True,
                 "flatten_branched": True,
-                "opponent_policy": lambda *_: 0,
+                "opponent_policy": get_baseline_opponent(),  # Use baseline!
                 "base_port": 50500,
             },
             "model": {
