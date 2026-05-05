@@ -204,7 +204,7 @@ class TeamShapedCallback(DefaultCallbacks):
         if _current_task < 1:
             return
 
-        agents = episode.get_agents()
+        agents = episode.get_agent_ids()
         obs_map = {a: episode.last_observation_for(a) for a in agents}
         prev_map = {a: episode._agent_to_last_obs.get(a) for a in agents}
 

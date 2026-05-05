@@ -8,8 +8,25 @@ import soccer_twos
 class RLLibWrapper(gym.core.Wrapper, MultiAgentEnv):
     """
     A RLLib wrapper so our env can inherit from MultiAgentEnv.
+    Ensures reset() and step() return dicts as expected by Ray multiagent.
     """
-    pass
+
+    def reset(self):
+        obs = self.env.reset()
+        # ensure dict is returned for multiagent
+        if not isinstance(obs, dict):
+            obs = {0: obs}
+        return obs
+
+    def step(self, action):
+        result = self.env.step(action)
+        obs, rew, done, info = result[0], result[1], result[2], result[3] if len(result) > 3 else {}
+        if not isinstance(obs, dict):
+            obs  = {0: obs}
+            rew  = {0: rew, "__all__": done}
+            done = {0: done, "__all__": done}
+            info = {0: info}
+        return obs, rew, done, info
 
 
 def create_rllib_env(env_config: dict = {}):

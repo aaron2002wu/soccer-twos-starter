@@ -38,63 +38,49 @@ W_SHOOT     = 0.05
 W_BLOCK     = 0.002
 W_SPREAD    = 0.002
 
+# Parse args at module level so callback can access them
+parser = argparse.ArgumentParser()
+parser.add_argument("--checkpoint", type=str, default=None)
+args = parser.parse_args()
+
 
 class SelfPlayCallback(DefaultCallbacks):
 
+    def on_trainer_init(self, *, trainer, **kwargs):
+        """Load weights from single-agent checkpoint into the default policy."""
+        if args.checkpoint:
+            import pickle
+            ckpt_file = args.checkpoint
+            with open(ckpt_file, "rb") as f:
+                data = pickle.load(f)
+            worker_state = pickle.loads(data["worker"])
+            weights = worker_state["state"]["default"]
+            trainer.set_weights({"default": weights})
+            print(f"  Loaded weights from: {ckpt_file}", flush=True)
+
     def on_episode_step(self, *, worker, base_env, episode, env_index, **kwargs):
-        agents = episode.get_agents()
-        obs_map  = {a: episode.last_observation_for(a) for a in agents}
-        prev_map = {a: episode._agent_to_last_obs.get(a) for a in agents}
-
-        for agent_id in agents:
-            obs      = obs_map[agent_id]
-            prev_obs = prev_map[agent_id]
-            if prev_obs is None:
-                continue
-
-            o = obs[:336]  if len(obs)      >= 336 else obs
-            p = prev_obs[:336] if len(prev_obs) >= 336 else prev_obs
-
-            ball_x,      ball_y      = float(o[7]), float(o[8])
-            prev_ball_x, prev_ball_y = float(p[7]), float(p[8])
-            ball_vel_x = float(o[4]) if len(o) > 4 else 0.0
-
-            shaped  = W_BALL_DIST * (np.sqrt(prev_ball_x**2 + prev_ball_y**2)
-                                   - np.sqrt(ball_x**2      + ball_y**2))
-            shaped += W_BALL_GOAL * max(0.0, ball_vel_x)
-            shaped += W_SHOOT     * max(0.0, ball_vel_x - 0.3)
-            if ball_x < 0:
-                shaped += W_BLOCK
-
-            teammate_ids = [a for a in agents if a != agent_id]
-            for tid in teammate_ids:
-                t_o = obs_map[tid]
-                t_ball_x = float(t_o[7] if len(t_o) >= 8 else t_o[0])
-                if ball_x * t_ball_x < 0:
-                    shaped += W_SPREAD
-
-            episode._agent_reward_history[agent_id][-1] += shaped
+        # Skip per-step shaping — use train_result stats only
+        pass
 
     def on_train_result(self, *, trainer, result, **kwargs):
-        it         = result["training_iteration"]
-        steps      = result["timesteps_total"]
-        pct        = 100 * steps / TARGET_STEPS
+        it          = result["training_iteration"]
+        steps       = result["timesteps_total"]
+        pct         = 100 * steps / TARGET_STEPS
         mean_reward = result.get("episode_reward_mean", float("nan"))
-        ep_len     = result.get("episode_len_mean", float("nan"))
-        eps        = result.get("episodes_total", 0)
+        ep_len      = result.get("episode_len_mean", float("nan"))
+        eps         = result.get("episodes_total", 0)
         print(
             f"  iter {it:4d} | steps {steps:>9,} ({pct:5.1f}%) | "
             f"reward {mean_reward:+.4f} | ep_len {ep_len:6.1f} | eps {eps:5d}",
             flush=True,
         )
+        # Periodic reminder: ep_len is the key metric in self-play
+        if it % 50 == 0:
+            print(f"  [self-play] ep_len trend matters — lower = better play quality",
+                  flush=True)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to checkpoint from phase 1 or 2 to restore from")
-    args = parser.parse_args()
-
     for name in ["mlagents_envs", "ray", "ray.tune", "ray.rllib"]:
         logging.getLogger(name).setLevel(logging.ERROR)
 
@@ -120,7 +106,6 @@ if __name__ == "__main__":
     analysis = tune.run(
         "PPO",
         name="cpu_selfplay_phase3",
-        restore=args.checkpoint,
         config={
             "num_gpus": 0,
             "num_workers": NUM_WORKERS,

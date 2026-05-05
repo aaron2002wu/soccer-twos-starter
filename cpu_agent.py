@@ -107,14 +107,32 @@ def load_baseline_opponent():
 from utils import create_rllib_env
 
 
-NUM_WORKERS = 10          # split cores with curriculum run
+NUM_WORKERS = 20          # split cores with curriculum run
 NUM_ENVS_PER_WORKER = 1
 TRAIN_BATCH = 10000
-TARGET_STEPS = 5_000_000
+TARGET_STEPS = 60_000_000
+
+# Set to checkpoint path to load weights from a previous run (handles filter mismatch)
+RESTORE_WEIGHTS_FROM = None  # incompatible architecture with self-play checkpoint
 
 
 class StatsCallback(DefaultCallbacks):
+
+    def on_episode_step(self, *, worker, base_env, episode, env_index, **kwargs):
+        pass
+
     def on_train_result(self, *, trainer, result, **kwargs):
+        if result["training_iteration"] == 1 and RESTORE_WEIGHTS_FROM:
+            import pickle
+            with open(RESTORE_WEIGHTS_FROM, "rb") as f:
+                data = pickle.load(f)
+            worker_state = pickle.loads(data["worker"])
+            state = worker_state["state"]
+            policy_key = "default" if "default" in state else list(state.keys())[0]
+            weights = state[policy_key]
+            # single-agent trainer uses "default_policy" key
+            trainer.get_policy().set_weights(weights)
+            print(f"  [iter 1] Loaded weights from '{policy_key}'", flush=True)
         it = result["training_iteration"]
         steps = result["timesteps_total"]
         reward = result.get("episode_reward_mean", float("nan"))
@@ -183,7 +201,11 @@ if __name__ == "__main__":
             "train_batch_size": TRAIN_BATCH,
             "sgd_minibatch_size": 256,
             "num_sgd_iter": 8,
-            "lr": 3e-4,
+            "lr_schedule": [
+                [0,            3e-4],
+                [5_000_000,    1e-4],
+                [15_000_000,   5e-5],
+            ],
             "gamma": 0.99,
             "lambda": 0.95,
             "clip_param": 0.2,
@@ -192,6 +214,7 @@ if __name__ == "__main__":
         stop={"timesteps_total": TARGET_STEPS},
         checkpoint_freq=50,
         checkpoint_at_end=True,
+        restore="/home/awu335/drl/soccer-twos-starter/ray_results/cpu_train_run1/PPO_Soccer_a897f_00000_0_2026-04-22_20-02-03/checkpoint_003000/checkpoint-3000",
         local_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), "ray_results"),
         verbose=0,  # suppress tune's own output, we use callback instead
     )
